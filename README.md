@@ -11,6 +11,8 @@ Welcome to Zed, a high-performance, multiplayer code editor from the creators of
 - Removed all instances of gradient fade truncation with proper ellipsis(...) truncation ([agent_panel.rs](./crates/agent_ui/src/agent_panel.rs), [sidebar.rs](./crates/sidebar/src/sidebar.rs), [thread_item.rs](./crates/ui/src/components/ai/thread_item.rs), [thread_view.rs](./crates/agent_ui/src/conversation_view/thread_view.rs))
 - Custom Github release builds ([sync_and_release.yml](./.github/workflows/sync_and_release.yml))
 - Updated internal Zed updater to download binaries from the Github releases of this fork ([sync_and_release.yml](./.github/workflows/sync_and_release.yml), [auto_update.rs](./crates/auto_update/src/auto_update.rs), [auto_update_ui.rs](./crates/auto_update_ui/src/auto_update_ui.rs), [github.rs](./crates/http_client/src/github.rs))
+- Repositioned the agent prompt floating edit-controls button to the bottom-right of the message and wrapped it in `deferred()` to fix a paint-order issue where the edit backdrop overlay would cover the buttons ([thread_view.rs](./crates/agent_ui/src/conversation_view/thread_view.rs))
+- Fork release notes are shown inside the app (fetched from this fork's Github releases) instead of upstream's release-notes API, and the "open in browser" fallback points to this fork's Github releases page ([auto_update.rs](./crates/auto_update/src/auto_update.rs), [auto_update_ui.rs](./crates/auto_update_ui/src/auto_update_ui.rs), [github.rs](./crates/http_client/src/github.rs))
 
 *</sup> Logo inspired by [Sajal Saha](https://dribbble.com/logosajol) from Dribble
 
