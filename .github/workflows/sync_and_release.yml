@@ -40,7 +40,7 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/zed-industries/zed.git || true
-          git fetch upstream main --tags
+          git fetch upstream main --tags --force
           
           # Merge updates from upstream
           git checkout main
