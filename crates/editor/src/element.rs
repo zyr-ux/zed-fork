@@ -7099,7 +7099,7 @@ impl LineWithInvisibles {
                         &Self::split_runs_by_bg_segments(&styles, segments, min_contrast, len)
                     };
                     let shaped_line = window.text_system().shape_line(
-                        line.clone().into(),
+                        line.as_str().into(),
                         font_size,
                         text_runs,
                         None,
@@ -8353,7 +8353,7 @@ impl Element for EditorElement {
                                     selected_buffer_ids
                                 };
 
-                                let mut selections = editor.selections.disjoint_in_range(
+                                let mut selections = editor.selections.disjoint_in_row_range(
                                     start_anchor..end_anchor,
                                     &snapshot.display_snapshot,
                                 );
