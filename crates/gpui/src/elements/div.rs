@@ -15,16 +15,16 @@
 //! and Tailwind-like styling that you can use to build your own custom elements. Div is
 //! constructed by combining these two systems into an all-in-one element.
 
-use crate::PinchEvent;
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
-    Display, Element, ElementId, Entity, EntityId, FocusHandle, Global, GlobalElementId, Hitbox,
-    HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent,
-    KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton,
-    MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
-    MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString,
-    Size, Style, StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea,
-    point, px, size,
+    Display, Element, ElementId, Entity, EntityId, ExternalDragPayload, ExternalDragPayloadSource,
+    FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId,
+    IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent,
+    LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow, ParentElement,
+    PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
+    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
+    size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -262,7 +262,10 @@ impl Interactivity {
     ) {
         self.mouse_down_listeners
             .push(Box::new(move |event, phase, hitbox, window, cx| {
-                if phase == DispatchPhase::Capture && !hitbox.contains(&window.mouse_position()) {
+                if phase == DispatchPhase::Capture
+                    && !window.has_active_prompt()
+                    && !hitbox.contains(&window.mouse_position())
+                {
                     (listener)(event, window, cx)
                 }
             }));
@@ -602,12 +605,41 @@ impl Interactivity {
             self.drag_listener.is_none(),
             "calling on_drag more than once on the same element is not supported"
         );
-        self.drag_listener = Some((
-            Arc::new(value),
-            Box::new(move |value, offset, window, cx| {
+        self.drag_listener = Some(DragListener {
+            value: Arc::new(value),
+            render: Box::new(move |value, offset, window, cx| {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
             }),
-        ));
+            external_payload: None,
+        });
+    }
+
+    /// Registers a callback resolving a payload to offer the platform if a drag started by this
+    /// element leaves the window. It is invoked at most once per drag gesture, when the pointer
+    /// exits the viewport. Must be called after [`Self::on_drag`], with the same dragged value
+    /// type `T`.
+    pub fn external_drag_payload<T>(
+        &mut self,
+        resolver: impl Fn(&T, &mut Window, &mut App) -> Option<ExternalDragPayload> + 'static,
+    ) where
+        Self: Sized,
+        T: 'static,
+    {
+        let Some(drag_listener) = self.drag_listener.as_mut() else {
+            debug_assert!(false, "external_drag_payload must be called after on_drag");
+            return;
+        };
+        debug_assert!(
+            drag_listener.value.as_ref().type_id() == TypeId::of::<T>(),
+            "external_drag_payload must use the same dragged value type as on_drag"
+        );
+        debug_assert!(
+            drag_listener.external_payload.is_none(),
+            "calling external_drag_payload more than once on the same element is not supported"
+        );
+        drag_listener.external_payload = Some(Box::new(move |value, window, cx| {
+            resolver(value.downcast_ref::<T>()?, window, cx)
+        }));
     }
 
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
@@ -1431,6 +1463,14 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Restrict scrolling of this element to the axis of the input gesture.
+    ///
+    /// See [`Style::restrict_scroll_to_axis`](crate::Style::restrict_scroll_to_axis) for details.
+    fn restrict_scroll_to_axis(mut self) -> Self {
+        self.interactivity().base_style.restrict_scroll_to_axis = Some(true);
+        self
+    }
+
     /// Track the scroll state of this element with the given handle.
     fn track_scroll(mut self, scroll_handle: &ScrollHandle) -> Self {
         self.interactivity().tracked_scroll_handle = Some(scroll_handle.clone());
@@ -1516,6 +1556,23 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Registers a callback resolving a payload to offer the platform if a drag started by this
+    /// element leaves the window. It is invoked at most once per drag gesture, when the pointer
+    /// exits the viewport. Must be called after [`Self::on_drag`], with the same dragged value
+    /// type `T`.
+    /// The fluent API equivalent to [`Interactivity::external_drag_payload`].
+    fn external_drag_payload<T>(
+        mut self,
+        resolver: impl Fn(&T, &mut Window, &mut App) -> Option<ExternalDragPayload> + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+        T: 'static,
+    {
+        self.interactivity().external_drag_payload(resolver);
+        self
+    }
+
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// The fluent API equivalent to [`Interactivity::on_hover`].
@@ -1583,8 +1640,14 @@ pub(crate) type PinchListener =
 
 pub(crate) type ClickListener = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-pub(crate) type DragListener =
-    Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>;
+pub(crate) struct DragListener {
+    value: Arc<dyn Any>,
+    render: Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>,
+    external_payload: Option<ExternalDragPayloadResolver>,
+}
+
+type ExternalDragPayloadResolver =
+    Box<dyn Fn(&dyn Any, &mut Window, &mut App) -> Option<ExternalDragPayload> + 'static>;
 
 type DropListener = Box<dyn Fn(&dyn Any, &mut Window, &mut App) + 'static>;
 
@@ -1960,6 +2023,7 @@ pub struct Interactivity {
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
+    pub(crate) ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) group: Option<SharedString>,
     /// The base style of the element, before any modifications are applied
     /// by focus, active, etc.
@@ -1991,7 +2055,7 @@ pub struct Interactivity {
     pub(crate) can_drop_predicate: Option<CanDropPredicate>,
     pub(crate) click_listeners: Vec<ClickListener>,
     pub(crate) aux_click_listeners: Vec<ClickListener>,
-    pub(crate) drag_listener: Option<(Arc<dyn Any>, DragListener)>,
+    pub(crate) drag_listener: Option<DragListener>,
     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) tooltip_show_delay: Option<Duration>,
@@ -2081,7 +2145,9 @@ impl Interactivity {
                 }
 
                 if let Some(scroll_handle) = self.tracked_scroll_handle.as_ref() {
-                    self.scroll_offset = Some(scroll_handle.0.borrow().offset.clone());
+                    let scroll_handle_state = scroll_handle.0.borrow();
+                    self.scroll_offset = Some(scroll_handle_state.offset.clone());
+                    self.ongoing_scroll = Some(scroll_handle_state.ongoing_scroll.clone());
                 } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
                     || self.base_style.overflow.y == Some(Overflow::Scroll))
                     && let Some(element_state) = element_state.as_mut()
@@ -2090,6 +2156,12 @@ impl Interactivity {
                         element_state
                             .scroll_offset
                             .get_or_insert_with(Rc::default)
+                            .clone(),
+                    );
+                    self.ongoing_scroll = Some(
+                        element_state
+                            .ongoing_scroll
+                            .get_or_insert_with(|| Rc::new(RefCell::new(OngoingScroll::default())))
                             .clone(),
                     );
                 }
@@ -2669,8 +2741,8 @@ impl Interactivity {
                     if phase == DispatchPhase::Capture && group_hovered != was_group_hovered {
                         if let Some(hover_state) = &hover_state {
                             hover_state.borrow_mut().group = group_hovered;
+                            cx.notify(current_view);
                         }
-                        cx.notify(current_view);
                     }
                 });
             }
@@ -2764,18 +2836,31 @@ impl Interactivity {
                         if let Some(mouse_down) = pending_mouse_down.clone()
                             && !cx.has_active_drag()
                             && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
-                            && let Some((drag_value, drag_listener)) = drag_listener.take()
+                            && let Some(listener) = drag_listener.take()
                             && mouse_down.button == MouseButton::Left
                         {
                             *clicked_state.borrow_mut() = ElementClickedState::default();
                             let cursor_offset = event.position - hitbox.origin;
-                            let drag =
-                                (drag_listener)(drag_value.as_ref(), cursor_offset, window, cx);
+                            let drag = (listener.render)(
+                                listener.value.as_ref(),
+                                cursor_offset,
+                                window,
+                                cx,
+                            );
+                            let external_payload_source =
+                                listener.external_payload.map(|external_payload| {
+                                    let value = listener.value.clone();
+                                    Box::new(move |window: &mut Window, cx: &mut App| {
+                                        external_payload(value.as_ref(), window, cx)
+                                    })
+                                        as ExternalDragPayloadSource
+                                });
                             cx.active_drag = Some(AnyDrag {
                                 view: drag,
-                                value: drag_value,
+                                value: listener.value,
                                 cursor_offset,
                                 cursor_style: drag_cursor_style,
+                                external_payload_source,
                             });
                             pending_mouse_down.take();
                             window.refresh();
@@ -3082,6 +3167,7 @@ impl Interactivity {
         _cx: &mut App,
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
+            let ongoing_scroll = self.ongoing_scroll.clone();
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -3092,24 +3178,35 @@ impl Interactivity {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
                     let old_scroll_offset = *scroll_offset;
-                    let delta = event.delta.pixel_delta(line_height);
+                    let mut delta = event.delta.pixel_delta(line_height);
 
-                    let mut delta_x = Pixels::ZERO;
-                    if overflow.x == Overflow::Scroll {
-                        if !delta.x.is_zero() {
-                            delta_x = delta.x;
-                        } else if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll {
-                            delta_x = delta.y;
-                        }
+                    if restrict_scroll_to_axis
+                        && event.delta.precise()
+                        && let Some(ongoing_scroll) = &ongoing_scroll
+                    {
+                        ongoing_scroll
+                            .borrow_mut()
+                            .filter(&mut delta, event.touch_phase);
                     }
-                    let mut delta_y = Pixels::ZERO;
-                    if overflow.y == Overflow::Scroll {
-                        if !delta.y.is_zero() {
-                            delta_y = delta.y;
-                        } else if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll {
-                            delta_y = delta.x;
+
+                    let mut delta_x = match overflow.x {
+                        Overflow::Scroll if !delta.x.is_zero() => delta.x,
+                        Overflow::Scroll
+                            if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll =>
+                        {
+                            delta.y
                         }
-                    }
+                        _ => Pixels::ZERO,
+                    };
+                    let mut delta_y = match overflow.y {
+                        Overflow::Scroll if !delta.y.is_zero() => delta.y,
+                        Overflow::Scroll
+                            if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll =>
+                        {
+                            delta.x
+                        }
+                        _ => Pixels::ZERO,
+                    };
                     if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
                         if delta_x.abs() > delta_y.abs() {
                             delta_y = Pixels::ZERO;
@@ -3357,6 +3454,7 @@ pub struct InteractiveElementState {
     /// blur). `None` means no activation key is pending.
     pub(crate) pending_keyboard_down: Option<Rc<RefCell<Option<u64>>>>,
     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
+    ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
 }
 
@@ -3892,6 +3990,7 @@ impl ScrollAnchor {
 #[derive(Default, Debug)]
 struct ScrollHandleState {
     offset: Rc<RefCell<Point<Pixels>>>,
+    ongoing_scroll: Rc<RefCell<OngoingScroll>>,
     bounds: Bounds<Pixels>,
     max_offset: Point<Pixels>,
     child_bounds: Vec<Bounds<Pixels>>,
@@ -4114,9 +4213,108 @@ mod tests {
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, Context, InputEvent, Keystroke, MouseMoveEvent,
-        TestAppContext, util::FluentBuilder as _,
+        TestAppContext, canvas, util::FluentBuilder as _,
     };
-    use std::rc::Weak;
+    use std::{cell::Cell, rc::Weak};
+
+    struct GroupHoverTestView {
+        render_count: Rc<Cell<usize>>,
+        anonymous_paint_count: Rc<Cell<usize>>,
+        stateful_width: Rc<Cell<Pixels>>,
+    }
+
+    impl Render for GroupHoverTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.render_count.set(self.render_count.get() + 1);
+            let anonymous_paint_count = self.anonymous_paint_count.clone();
+            let stateful_width = self.stateful_width.clone();
+            div().size_full().child(
+                div()
+                    .ml(px(20.))
+                    .mt(px(20.))
+                    .size(px(50.))
+                    .relative()
+                    .group("hover-group")
+                    .child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .invisible()
+                            .group_hover("hover-group", |style| style.visible())
+                            .child(canvas(
+                                |_, _, _| {},
+                                move |_, _, _, _| {
+                                    anonymous_paint_count.set(anonymous_paint_count.get() + 1)
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("stateful-group-hover-target")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size(px(10.))
+                            .group_hover("hover-group", |style| style.size(px(20.)))
+                            .child(canvas(
+                                move |bounds, _, _| stateful_width.set(bounds.size.width),
+                                |_, _, _, _| {},
+                            )),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn group_hover_styles_update_only_on_transitions(cx: &mut TestAppContext) {
+        let render_count = Rc::new(Cell::new(0));
+        let anonymous_paint_count = Rc::new(Cell::new(0));
+        let stateful_width = Rc::new(Cell::new(px(0.)));
+        let window = cx.add_window({
+            let render_count = render_count.clone();
+            let anonymous_paint_count = anonymous_paint_count.clone();
+            let stateful_width = stateful_width.clone();
+            move |_, _| GroupHoverTestView {
+                render_count,
+                anonymous_paint_count,
+                stateful_width,
+            }
+        });
+        let window = AnyWindowHandle::from(window);
+
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(anonymous_paint_count.get(), 0);
+        assert_eq!(stateful_width.get(), px(10.));
+
+        let move_mouse = |cx: &mut TestAppContext, position| {
+            cx.update_window(window, |_, window, cx| {
+                window.simulate_mouse_move(position, cx)
+            })
+            .unwrap();
+        };
+
+        let initial_render_count = render_count.get();
+        move_mouse(cx, point(px(25.), px(25.)));
+        assert_eq!(render_count.get(), initial_render_count + 1);
+        assert_eq!(anonymous_paint_count.get(), 1);
+        assert_eq!(stateful_width.get(), px(20.));
+
+        move_mouse(cx, point(px(30.), px(30.)));
+        assert_eq!(render_count.get(), initial_render_count + 1);
+        assert_eq!(anonymous_paint_count.get(), 1);
+        assert_eq!(stateful_width.get(), px(20.));
+
+        move_mouse(cx, point(px(5.), px(5.)));
+        assert_eq!(render_count.get(), initial_render_count + 2);
+        assert_eq!(anonymous_paint_count.get(), 1);
+        assert_eq!(stateful_width.get(), px(10.));
+
+        move_mouse(cx, point(px(10.), px(10.)));
+        assert_eq!(render_count.get(), initial_render_count + 2);
+        assert_eq!(anonymous_paint_count.get(), 1);
+        assert_eq!(stateful_width.get(), px(10.));
+    }
 
     struct TestTooltipView;
 
@@ -4284,7 +4482,7 @@ mod tests {
 
         test_app
             .update_window(any_window, |_, window, cx| {
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             })
             .unwrap();
 
@@ -4304,7 +4502,7 @@ mod tests {
 
         test_app
             .update_window(any_window, |_, window, cx| {
-                window.draw(cx).clear();
+                window.draw(cx).clear(cx);
             })
             .unwrap();
 
@@ -4424,6 +4622,87 @@ mod tests {
         assert!(active_tooltip.borrow().is_none());
     }
 
+    struct MouseDownOutOwner {
+        mouse_down_out_count: Rc<RefCell<usize>>,
+    }
+
+    impl Render for MouseDownOutOwner {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mouse_down_out_count = self.mouse_down_out_count.clone();
+            div()
+                .size_full()
+                .child(div().id("target").w(px(50.)).h(px(50.)).on_mouse_down_out(
+                    move |_, _, _| {
+                        *mouse_down_out_count.borrow_mut() += 1;
+                    },
+                ))
+        }
+    }
+
+    #[test]
+    fn mouse_down_out_is_suppressed_while_window_prompt_is_active() {
+        let mut test_app = TestAppContext::single();
+        let mouse_down_out_count = Rc::new(RefCell::new(0));
+        let window = test_app.add_window({
+            let mouse_down_out_count = mouse_down_out_count.clone();
+            move |_, _| MouseDownOutOwner {
+                mouse_down_out_count,
+            }
+        });
+        let any_window: AnyWindowHandle = window.into();
+
+        fn dispatch_mouse_down_outside_target(
+            test_app: &mut TestAppContext,
+            any_window: AnyWindowHandle,
+        ) {
+            test_app
+                .update_window(any_window, |_, window, cx| {
+                    window.dispatch_event(
+                        MouseDownEvent {
+                            position: point(px(75.), px(75.)),
+                            button: MouseButton::Left,
+                            modifiers: Default::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                })
+                .unwrap();
+        }
+
+        test_app
+            .update_window(any_window, |_, window, cx| {
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+
+        dispatch_mouse_down_outside_target(&mut test_app, any_window);
+        assert_eq!(
+            *mouse_down_out_count.borrow(),
+            1,
+            "mouse down outside the element should fire mouse-down-out listeners"
+        );
+
+        test_app
+            .update_window(any_window, |_, window, cx| {
+                cx.set_prompt_builder(crate::fallback_prompt_renderer);
+                let _receiver =
+                    window.prompt(crate::PromptLevel::Warning, "message", None, &["Ok"], cx);
+                assert!(window.has_active_prompt());
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+
+        dispatch_mouse_down_outside_target(&mut test_app, any_window);
+        assert_eq!(
+            *mouse_down_out_count.borrow(),
+            1,
+            "mouse down over an active prompt should not fire mouse-down-out listeners"
+        );
+    }
+
     #[test]
     fn test_write_a11y_info_string_and_numeric_properties() {
         let mut interactivity = Interactivity::default();
@@ -4510,7 +4789,7 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         })
         .unwrap();
     }
@@ -4702,7 +4981,7 @@ mod tests {
                 }
             })
             .into();
-        cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
 
         // Focus the *second* group's container, then advance like Tab would.
