@@ -88,10 +88,67 @@ Non-negative `float` values
 }
 ```
 
-## Agent Font Size
+## Agent Panel {#agent-panel}
+
+To configure panel sizing, open the Settings Editor and search for “Agent Panel Default Width” or “Agent Panel Flexible Sizing”.
+
+### Default Width {#agent-panel-default-width}
+
+- Description: Default fixed width in pixels when the agent panel is docked to the left or right and `agent.flexible` is `false`.
+- Setting: `agent.default_width`
+- Default: `640`
+
+### Flexible Sizing {#agent-panel-flexible-sizing}
+
+- Description: Whether the agent panel uses flexible (proportional) sizing when docked to the left or right. When enabled, `agent.default_width` does not control the panel width, and double-clicking the panel’s outer resize handle restores the default proportion.
+- Setting: `agent.flexible`
+- Default: `true`
+
+**Options**
+
+`boolean` values
+
+To use a fixed reset width, disable flexible sizing in the Settings Editor. Or add this to your settings.json:
+
+```json [settings]
+{
+  "agent": {
+    "default_width": 640,
+    "flexible": false
+  }
+}
+```
+
+See [Agent Panel visual customization](../visual-customization.md#agent-panel) for other panel appearance settings.
+
+### Threads Sidebar Default Width {#agent-threads-sidebar-default-width}
+
+- Description: Default width in pixels of the [Threads Sidebar](../ai/parallel-agents.md#threads-sidebar).
+- Setting: `agent.threads_sidebar_default_width`
+- Default: `300`
+
+**Options**
+
+Numbers from `200` to `800` pixels (inclusive). Values outside this range are clamped to the nearest limit.
+
+Open the Settings Editor and search for “Threads Sidebar Default Width”. Or add this to your `settings.json`:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar_default_width": 360
+  }
+}
+```
+
+If you haven’t manually resized the sidebar, its width follows changes to this setting immediately. A manually resized width takes precedence until you double-click the divider to reset it. After resetting, the sidebar follows this setting again.
+
+Widths saved by older versions of Zed are preserved if they differ from the previous default of 300 pixels. A saved width of 300 pixels uses this setting instead.
+
+## Agent UI Font Size
 
 - Description: The font size for text in the agent panel. Inherits the UI font size if unset.
-- Setting: `agent_font_size`
+- Setting: `agent_ui_font_size`
 - Default: `null`
 
 **Options**
@@ -552,6 +609,24 @@ When enabled, this setting will automatically close tabs for files that have bee
 }
 ```
 
+## Command Palette
+
+### Use Command History
+
+- Description: Whether to use command history ranking for sorting in the command palette.
+- Setting: `command_palette.use_command_history`
+- Default: `true`
+
+Disabling this setting does not erase history.
+
+```json [settings]
+{
+  "command_palette": {
+    "use_command_history": false
+  }
+}
+```
+
 ## Confirm Quit
 
 - Description: Whether or not to prompt the user to confirm before closing the application.
@@ -700,12 +775,53 @@ For the case of "open", regular selection behavior can be achieved by holding `a
       "**/*.cert",
       "**/*.crt",
       "**/.dev.vars",
-      "**/secrets.yml"
+      "**/secrets.yml",
+      "**/.zed/settings.json",
+      "/**/zed/settings.json",
+      "/**/zed/keymap.json"
     ]
   }
 ```
 
 **Options**
+
+### Edit Prediction Provider
+
+- Description: Which edit prediction provider to use
+- Setting: `provider`
+- Default: `"zed"`
+
+**Options**
+
+1. Use Zeta as the edit prediction provider:
+
+```json [settings]
+{
+  "edit_predictions": {
+    "provider": "zed"
+  }
+}
+```
+
+2. Use Copilot as the edit prediction provider:
+
+```json [settings]
+{
+  "edit_predictions": {
+    "provider": "copilot"
+  }
+}
+```
+
+3. Turn off edit predictions across all providers
+
+```json [settings]
+{
+  "edit_predictions": {
+    "provider": "none"
+  }
+}
+```
 
 ### Disabled Globs
 
@@ -1995,58 +2111,6 @@ While other options may be changed at a runtime and should be placed under `sett
 **Options**
 
 `integer` values representing milliseconds
-
-## Features
-
-- Description: Features that can be globally enabled or disabled
-- Setting: `features`
-- Default:
-
-```json [settings]
-{
-  "edit_predictions": {
-    "provider": "zed"
-  }
-}
-```
-
-### Edit Prediction Provider
-
-- Description: Which edit prediction provider to use
-- Setting: `edit_prediction_provider`
-- Default: `"zed"`
-
-**Options**
-
-1. Use Zeta as the edit prediction provider:
-
-```json [settings]
-{
-  "edit_predictions": {
-    "provider": "zed"
-  }
-}
-```
-
-2. Use Copilot as the edit prediction provider:
-
-```json [settings]
-{
-  "edit_predictions": {
-    "provider": "copilot"
-  }
-}
-```
-
-3. Turn off edit predictions across all providers
-
-```json [settings]
-{
-  "edit_predictions": {
-    "provider": "none"
-  }
-}
-```
 
 ## Focus Follows Mouse
 
@@ -3783,15 +3847,23 @@ Examples:
 
 List of `string` glob patterns
 
-## Projects Online By Default
+## Read-Only Files {#read-only-files}
 
-- Description: Whether or not to show the online projects view by default.
-- Setting: `projects_online_by_default`
-- Default: `true`
+- Default: `[]`
+- Description: Glob patterns for files you can open and view but cannot edit, such as generated files or external dependencies.
+- Setting: `read_only_files`
 
-**Options**
+Add this to your project’s `.zed/settings.json`:
 
-`boolean` values
+```json [settings]
+{
+  "read_only_files": ["**/generated/**", "..."]
+}
+```
+
+Like [File Scan Exclusions](#file-scan-exclusions), `"..."` expands to the list inherited from the preceding settings layer. This example adds generated files to the read-only patterns from your user settings without repeating them. Duplicate entries collapse to their first occurrence.
+
+Omit `"..."` to replace the inherited list, or use `[]` to clear it. These patterns apply when you open a file.
 
 ## Read SSH Config
 
