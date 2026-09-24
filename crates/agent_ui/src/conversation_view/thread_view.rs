@@ -2472,7 +2472,7 @@ impl ThreadView {
                     .get(index)
                     .and_then(|e| e.user_message())
                 {
-                    editor.set_message(user_message.chunks.clone(), window, cx);
+                    editor.set_message(user_message.content.source_blocks().to_vec(), window, cx);
                 }
             })
         };
@@ -4014,8 +4014,13 @@ impl ThreadView {
                                         .children(summary.iter().enumerate().map(
                                             |(content_ix, content)| {
                                                 self.render_output_content_block(
-                                                    entry_ix, content_ix, content, None, true,
-                                                    window, cx,
+                                                    entry_ix,
+                                                    content_ix,
+                                                    content.as_view(),
+                                                    None,
+                                                    true,
+                                                    window,
+                                                    cx,
                                                 )
                                             },
                                         )),
@@ -7450,7 +7455,6 @@ impl ThreadView {
         v_flex().w_full().gap_3().children(
             content
                 .blocks()
-                .iter()
                 .enumerate()
                 .filter(|(_, block)| block.visible_content(cx))
                 .map(|(block_ix, block)| {
@@ -10254,7 +10258,7 @@ impl ThreadView {
             ToolCallContent::ContentBlock(content) => self.render_output_content_block(
                 entry_ix,
                 context_ix,
-                content,
+                content.as_view(),
                 Some(tool_call),
                 card_layout,
                 window,
@@ -10280,7 +10284,7 @@ impl ThreadView {
         &self,
         entry_ix: usize,
         context_ix: usize,
-        content: &acp_thread::ContentBlock,
+        content: acp_thread::ContentBlockView<'_>,
         tool_call: Option<&ToolCall>,
         card_layout: bool,
         window: &Window,
