@@ -580,6 +580,7 @@ pub struct ThreadView {
     pub workspace: WeakEntity<Workspace>,
     pub entry_view_state: Entity<EntryViewState>,
     pub title_editor: Entity<Editor>,
+    title_editor_sync_version: Option<(gpui::EntityId, clock::Global)>,
     pub config_options_view: Option<Entity<ConfigOptionsView>>,
     pub mode_selector: Option<Entity<ModeSelector>>,
     pub model_selector: Option<Entity<ModelSelectorPopover>>,
@@ -889,22 +890,26 @@ impl ThreadView {
             }));
         }
 
-        let title_editor = {
+        let (title_editor, title_editor_sync_version) = {
             let metadata = ThreadMetadataStore::try_global(cx)
                 .and_then(|store| store.read(cx).entry(root_thread_id).cloned());
             let initial_title = if parent_session_id.is_none() {
-                metadata.as_ref().and_then(|m| m.title())
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.title_override.clone())
             } else {
-                thread.read(cx).title()
+                None
             }
+            .or_else(|| thread.read(cx).title())
             .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into());
             let editor = cx.new(|cx| {
                 let mut editor = Editor::single_line(window, cx);
                 editor.set_text(initial_title, window, cx);
                 editor
             });
+            let version = Self::title_editor_version(editor.read(cx), cx);
             subscriptions.push(cx.subscribe_in(&editor, window, Self::handle_title_editor_event));
-            editor
+            (editor, version)
         };
 
         subscriptions.push(cx.subscribe_in(
@@ -1016,6 +1021,7 @@ impl ThreadView {
             workspace,
             entry_view_state,
             title_editor,
+            title_editor_sync_version,
             config_options_view,
             mode_selector,
             model_selector,
@@ -2822,6 +2828,29 @@ impl ThreadView {
         cx.notify();
     }
 
+    fn title_editor_version(editor: &Editor, cx: &App) -> Option<(gpui::EntityId, clock::Global)> {
+        editor
+            .buffer()
+            .read(cx)
+            .as_singleton()
+            .map(|buffer| (buffer.entity_id(), buffer.read(cx).version()))
+    }
+
+    pub(super) fn sync_title_editor(
+        &mut self,
+        title: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.title_editor.read(cx).text(cx) == title {
+            return;
+        }
+        self.title_editor_sync_version = self.title_editor.update(cx, |editor, cx| {
+            editor.set_text(title, window, cx);
+            Self::title_editor_version(editor, cx)
+        });
+    }
+
     pub fn handle_title_editor_event(
         &mut self,
         title_editor: &Entity<Editor>,
@@ -2831,13 +2860,15 @@ impl ThreadView {
     ) {
         match event {
             EditorEvent::BufferEdited => {
-                // We only want to set the title if the user has actively edited
-                // it. If the title editor is not focused, we programmatically
-                // changed the text, so we don't want to set the title again.
                 if !title_editor.read(cx).is_focused(window) {
                     return;
                 }
 
+                // BufferEdited has no origin; equal text can still be an explicit user rename.
+                let version = Self::title_editor_version(title_editor.read(cx), cx);
+                if version.is_some() && version == self.title_editor_sync_version {
+                    return;
+                }
                 let new_title = title_editor.read(cx).text(cx);
                 if new_title.is_empty() {
                     return;
@@ -2846,9 +2877,7 @@ impl ThreadView {
             }
             EditorEvent::Blurred => {
                 if title_editor.read(cx).text(cx).is_empty() {
-                    title_editor.update(cx, |editor, cx| {
-                        editor.set_text(DEFAULT_THREAD_TITLE, window, cx);
-                    });
+                    self.sync_title_editor(DEFAULT_THREAD_TITLE.into(), window, cx);
                 }
             }
             _ => {}
@@ -2860,11 +2889,7 @@ impl ThreadView {
     /// inline rename) so that they go through the same persistence path as
     /// the in-thread title editor.
     pub fn rename(&mut self, title: SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        if self.title_editor.read(cx).text(cx) != title.as_ref() {
-            self.title_editor.update(cx, |editor, cx| {
-                editor.set_text(title.clone(), window, cx);
-            });
-        }
+        self.sync_title_editor(title.clone(), window, cx);
         self.apply_renamed_title(title, cx);
     }
 
