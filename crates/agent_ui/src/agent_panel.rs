@@ -7234,11 +7234,15 @@ mod tests {
             Task::ready(Ok(()))
         }
 
-        fn auth_methods(&self) -> &[acp::AuthMethod] {
+        fn auth_methods(&self) -> &[acp_v2::AuthMethod] {
             &[]
         }
 
-        fn authenticate(&self, _method_id: acp::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
+        fn authenticate(
+            &self,
+            _method_id: acp_v2::AuthMethodId,
+            _cx: &mut App,
+        ) -> Task<Result<()>> {
             Task::ready(Ok(()))
         }
 
@@ -14094,11 +14098,15 @@ mod tests {
             Task::ready(Ok(()))
         }
 
-        fn auth_methods(&self) -> &[acp::AuthMethod] {
+        fn auth_methods(&self) -> &[acp_v2::AuthMethod] {
             &[]
         }
 
-        fn authenticate(&self, _method_id: acp::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
+        fn authenticate(
+            &self,
+            _method_id: acp_v2::AuthMethodId,
+            _cx: &mut App,
+        ) -> Task<Result<()>> {
             Task::ready(Ok(()))
         }
 
