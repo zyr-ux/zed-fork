@@ -3398,6 +3398,8 @@ pub struct AcpThread {
     had_error: bool,
     /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
     draft_prompt: Option<Vec<acp_v2::ContentBlock>>,
+    /// Lets observers detect draft changes without comparing prompts.
+    draft_prompt_revision: usize,
     /// The initial scroll position for the thread view, set during session registration.
     ui_scroll_position: Option<gpui::ListOffset>,
     /// A cursor over retained source, rather than a second text store, lets the UI
@@ -3733,6 +3735,7 @@ impl AcpThread {
             pending_terminal_exit: HashMap::default(),
             had_error: false,
             draft_prompt: None,
+            draft_prompt_revision: 0,
             ui_scroll_position: None,
             streaming_text_buffer: None,
             idle_sleep_prevention: IdleSleepPrevention::Inactive,
@@ -3768,6 +3771,10 @@ impl AcpThread {
         self.draft_prompt.as_deref()
     }
 
+    pub fn draft_prompt_revision(&self) -> usize {
+        self.draft_prompt_revision
+    }
+
     pub fn set_draft_prompt(
         &mut self,
         prompt: Option<Vec<acp_v2::ContentBlock>>,
@@ -3775,6 +3782,7 @@ impl AcpThread {
     ) {
         cx.emit(AcpThreadEvent::PromptUpdated);
         self.draft_prompt = prompt;
+        self.draft_prompt_revision += 1;
     }
 
     pub fn ui_scroll_position(&self) -> Option<gpui::ListOffset> {
@@ -3896,6 +3904,12 @@ impl AcpThread {
 
     pub fn supports_truncate(&self, cx: &App) -> bool {
         self.connection.truncate(self.session_id(), cx).is_some()
+    }
+
+    /// Gates editing and restoring user messages, and whether sending one takes
+    /// a git checkpoint, which only the "Restore Checkpoint" button consumes.
+    pub fn can_rewind_to(&self, client_id: Option<&ClientUserMessageId>, cx: &App) -> bool {
+        client_id.is_some() && self.parent_session_id.is_none() && self.supports_truncate(cx)
     }
 
     pub fn work_dirs(&self) -> Option<&PathList> {
@@ -6140,6 +6154,7 @@ impl AcpThread {
         let client_id = client_user_message_ids
             .as_ref()
             .map(|client_user_message_ids| client_user_message_ids.new_id());
+        let should_checkpoint = self.can_rewind_to(client_id.as_ref(), cx);
 
         self.run_turn(id, cx, async move |this, cx| {
             if push_user_message {
@@ -6159,20 +6174,22 @@ impl AcpThread {
                 })
                 .ok();
 
-                let old_checkpoint = git_store
-                    .update(cx, |git, cx| git.checkpoint(cx))
-                    .await
-                    .context("failed to get old checkpoint")
-                    .log_err();
-                this.update(cx, |this, _cx| {
-                    if let Some((_ix, message)) = this.last_user_message() {
-                        message.checkpoint = old_checkpoint.map(|git_checkpoint| Checkpoint {
-                            git_checkpoint,
-                            show: false,
-                        });
-                    }
-                })
-                .ok();
+                if should_checkpoint {
+                    let old_checkpoint = git_store
+                        .update(cx, |git, cx| git.checkpoint(cx))
+                        .await
+                        .context("failed to get old checkpoint")
+                        .log_err();
+                    this.update(cx, |this, _cx| {
+                        if let Some((_ix, message)) = this.last_user_message() {
+                            message.checkpoint = old_checkpoint.map(|git_checkpoint| Checkpoint {
+                                git_checkpoint,
+                                show: false,
+                            });
+                        }
+                    })
+                    .ok();
+                }
             }
 
             this.update(cx, |this, cx| {
@@ -15432,6 +15449,156 @@ mod tests {
             .send(())
             .ok();
         send_task.await.unwrap();
+    }
+
+    #[gpui::test]
+    async fn test_no_checkpoints_when_restore_is_unavailable(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/test"),
+            json!({
+                ".git": {}
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [path!("/test").as_ref()], cx).await;
+        let checkpoint_jobs = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                let repository = project.git_store().read(cx).active_repository().unwrap();
+                let queue = repository.read(cx).job_debug_queue().to_debug_value();
+                queue["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|job| job["description"] == "checkpoint")
+                    .count()
+            })
+        };
+
+        let next_filename = Arc::new(AtomicUsize::new(0));
+        let finish_turn_rx_slot = Rc::new(RefCell::new(None::<oneshot::Receiver<()>>));
+        let write_file_on_prompt = {
+            let fs = fs.clone();
+            let finish_turn_rx_slot = finish_turn_rx_slot.clone();
+            move |_request: acp_v2::PromptRequest,
+                  _thread: WeakEntity<AcpThread>,
+                  _cx: AsyncApp|
+                  -> LocalBoxFuture<'static, Result<acp_v1::PromptResponse>> {
+                let fs = fs.clone();
+                let path = Path::new(path!("/test"))
+                    .join(format!("file-{}", next_filename.fetch_add(1, SeqCst)));
+                let finish_turn_rx = finish_turn_rx_slot.borrow_mut().take();
+                async move {
+                    fs.write(&path, b"").await?;
+                    if let Some(finish_turn_rx) = finish_turn_rx {
+                        finish_turn_rx.await.ok();
+                    }
+                    Ok(acp_v1::PromptResponse::new(acp_v1::StopReason::EndTurn))
+                }
+                .boxed_local()
+            }
+        };
+
+        let connection = Rc::new(
+            FakeAgentConnection::new()
+                .without_truncate_support()
+                .on_user_message(write_file_on_prompt.clone()),
+        );
+        let thread_without_truncate = cx
+            .update(|cx| {
+                connection.new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new(path!("/test"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message(write_file_on_prompt));
+        let parent = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new(path!("/test"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let subagent_session_id = acp_v1::SessionId::new("subagent");
+        let subagent = cx.update(|cx| {
+            let action_log = cx.new(|_| ActionLog::new(project.clone()));
+            cx.new(|cx| {
+                AcpThread::new(
+                    Some(parent.read(cx).session_id().clone()),
+                    None,
+                    None,
+                    connection.clone(),
+                    project.clone(),
+                    action_log,
+                    subagent_session_id.clone(),
+                    watch::Receiver::constant(acp_v2::PromptCapabilities::new()),
+                    cx,
+                )
+            })
+        });
+        connection
+            .sessions
+            .lock()
+            .insert(subagent_session_id, subagent.downgrade());
+
+        // The parent shows that sending, repository updates during the turn, and
+        // turn completion each take checkpoints, so zero counts elsewhere mean
+        // those paths ran without taking any.
+        for (thread, can_rewind) in [
+            (thread_without_truncate, false),
+            (subagent, false),
+            (parent, true),
+        ] {
+            assert_eq!(
+                thread.read_with(cx, |thread, cx| {
+                    thread.can_rewind_to(Some(&ClientUserMessageId::new()), cx)
+                }),
+                can_rewind
+            );
+            let jobs_before_send = checkpoint_jobs(cx);
+            let (finish_turn_tx, finish_turn_rx) = oneshot::channel();
+            finish_turn_rx_slot.replace(Some(finish_turn_rx));
+            let send = thread.update(cx, |thread, cx| thread.send(vec!["hello".into()], cx));
+            let send_task = cx.background_executor.spawn(send);
+            cx.run_until_parked();
+
+            assert!(thread.read_with(cx, |thread, _| thread.running_turn.is_some()));
+            let jobs_while_running = checkpoint_jobs(cx);
+            finish_turn_tx.send(()).ok();
+            send_task.await.unwrap();
+            cx.run_until_parked();
+            let jobs_after_turn = checkpoint_jobs(cx);
+
+            if can_rewind {
+                assert_eq!(jobs_while_running, jobs_before_send + 2);
+                assert_eq!(jobs_after_turn, jobs_while_running + 1);
+            } else {
+                assert_eq!(jobs_while_running, jobs_before_send);
+                assert_eq!(jobs_after_turn, jobs_before_send);
+            }
+            thread.read_with(cx, |thread, _| {
+                let AgentThreadEntry::UserMessage(message) = &thread.entries[0] else {
+                    panic!("unexpected entries {:?}", thread.entries)
+                };
+                assert_eq!(message.checkpoint.is_some(), can_rewind);
+            });
+        }
+        assert_eq!(
+            fs.files(),
+            vec![
+                Path::new(path!("/test/file-0")),
+                Path::new(path!("/test/file-1")),
+                Path::new(path!("/test/file-2"))
+            ]
+        );
     }
 
     #[gpui::test]
