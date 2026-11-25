@@ -101,18 +101,16 @@ jobs:
             server_path: target/zed-remote-server-linux-aarch64.gz
             
           # macOS ARM64 (Apple Silicon)
-          - os: macos-15
+          - os: macos-26
             target: aarch64-apple-darwin
             arch: aarch64
-            macosx_deployment_target: "11.0"
             client_path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
             server_path: target/zed-remote-server-macos-aarch64.gz
             
           # macOS x86_64 (Intel)
-          - os: macos-15
+          - os: macos-26
             target: x86_64-apple-darwin
             arch: x86_64
-            macosx_deployment_target: "10.15.7"
             client_path: target/x86_64-apple-darwin/release/Zed-x86_64.dmg
             server_path: target/zed-remote-server-macos-x86_64.gz
 
@@ -157,6 +155,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           shared-key: "zed-build"
+          cache-targets: false
 
       - name: Set Release Channel
         shell: bash
@@ -199,7 +198,6 @@ jobs:
         if: runner.os == 'macOS'
         env:
           TARGET: ${{ matrix.target }}
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
         run: |
           success=false
           for i in 1 2 3; do

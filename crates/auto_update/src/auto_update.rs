@@ -701,7 +701,7 @@ impl AutoUpdater {
                     ReleaseChannel::Nightly => format!("v{}-nightly", v),
                     _ => format!("v{}", v),
                 };
-                match http_client::github::get_release_by_tag_name(
+                match github_releases::get_release_by_tag_name(
                     &repo,
                     &tag,
                     http_client.clone() as Arc<dyn HttpClient>,
@@ -712,7 +712,7 @@ impl AutoUpdater {
                     Err(err) => {
                         let std_tag = format!("v{}", v);
                         if std_tag != tag {
-                            http_client::github::get_release_by_tag_name(
+                            github_releases::get_release_by_tag_name(
                                 &repo,
                                 &std_tag,
                                 http_client.clone() as Arc<dyn HttpClient>,
@@ -725,7 +725,7 @@ impl AutoUpdater {
                 }
             } else {
                 let is_prerelease = matches!(release_channel, ReleaseChannel::Preview | ReleaseChannel::Nightly);
-                http_client::github::latest_github_release(
+                github_releases::latest_github_release(
                     &repo,
                     true,
                     is_prerelease,
@@ -1449,7 +1449,7 @@ pub async fn fetch_github_release_notes(
     client: Arc<Client>,
 ) -> Result<(String, String)> {
     let http_client = client.http_client();
-    let release = http_client::github::get_release_by_tag_name(
+    let release = github_releases::get_release_by_tag_name(
         repo,
         tag,
         http_client.clone() as Arc<dyn HttpClient>,
