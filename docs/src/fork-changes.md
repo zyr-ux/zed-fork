@@ -246,27 +246,40 @@ In general, preserve:
 
 ## 5. Custom GitHub sync-and-release workflow
 
-### File
-- `.github/workflows/sync_and_release.yml`
+### Files
+- [Sync-and-release workflow](../../.github/workflows/sync_and_release.yml)
+- [Last processed preview tag](../../.github/last_synced__tag)
 
 ### What changed
-This fork adds a repo-owned GitHub Actions workflow for syncing with `upstream/main`, building fork binaries, and publishing releases from this fork repository.
+This fork adds a repo-owned GitHub Actions workflow that checks daily for a new upstream preview release, merges `upstream/main` only when that preview has not been processed, and builds and publishes fork binaries.
+
+The preview tag gates syncing; it is not the source revision used for the app. The fork still incorporates upstream main, including unreleased changes and its app-version bumps. No release-tag baseline migration or history rewrite is needed.
 
 ### Why it was changed
 This fork needs its own release pipeline so users receive fork builds instead of upstream binaries, and so the internal updater can point at this repository's releases.
 
 ### Notes
-Most of the workflow file is self-explanatory from the code. A number of the commits in this area were practical CI fixes for Windows, macOS, Linux, artifact paths, tokens, and release-note generation.
+The workflow selects the highest numeric published prerelease matching `vMAJOR.MINOR.PATCH-pre`, excluding drafts and nightly releases. It compares this with `.github/last_synced__tag`, initialized to `v1.31.0-pre`.
+
+If the tag matches, syncing is skipped. If it differs, the workflow fetches and merges upstream main, then commits the tracking value and pushes main. A conflict stops the run before the tracking value or remote main is updated. Scheduled runs retry the pending integration daily. The owner can resolve the merge locally, push, and manually run the workflow; that run attempts any pending sync again before building.
+
+After syncing or skipping the merge, the workflow reads the app version from the fork source. Scheduled runs build only when that version has no fork release, allowing retries after build failures even when the preview was already recorded. Manual runs always build. If the version already exists, manual publication replaces its assets and force-updates its tag, preserving the existing release policy.
+
+Every platform build and publication job checks out the same recorded fork commit SHA. Upstream release notes are fetched for the recorded preview tag, even though the build can contain newer upstream-main code.
+
+There is no fork test workflow or test gate before packaging. The README's **Upstream Tests** badge reports tests in the upstream repository, not verification of fork customizations. The **Fork Sync** badge reports the fork's complete sync-and-release workflow status, including build and publication failures.
 
 The important fork-level behavior to preserve is:
 - releases are built and published from this fork repo, not upstream
 - `ZED_UPDATE_REPO` is set to `${{ github.repository }}`
 - scheduled syncs should not publish duplicate releases when the version already exists
 - the published release notes should continue to include the upstream changelog context
+- unchanged preview tags must not cause another upstream-main merge
+- the tracking tag must advance only after a successful integration
+- builds and release tags must identify the same fork commit
 
 ### Merge guidance
 Treat `.github/workflows/sync_and_release.yml` as fork-owned.
-
 If upstream changes build scripts, artifact names, or release conventions:
 - update this workflow to match the new reality
 - keep it targeting the fork repository
